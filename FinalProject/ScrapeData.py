@@ -1,55 +1,87 @@
 #!/bin/python
 # -----------------------------------------------------------------------------
-#  File:        StockDistributionFitting.py
-#  Usage:       python StockDistributionFitting.py 
-#  Description: Project to fit distributions of historical stock returns
+#  File:        ScrapeData.py
+#  Usage:       python ScrapeData.py 
+#  Description: Scrape and clean 10-X documents from SEC EDGAR database, link to
+#               historical stock returns from Yahoo Finance API
 #  Created:     22-Feb-2016 Dustin Burns
 # -----------------------------------------------------------------------------
 import pandas as pd
 from yahoo_finance import Share
 import argparse
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import scipy.stats as stats
 import wget
 import nltk
 import re
 import os
+from collections import Counter
+from datetime import timedelta
+from collections import OrderedDict
+
+def cik_to_ticker(cik):
+  key = pd.read_csv('data/cik_ticker.csv', sep='|')  
+  key.CIK = key.CIK.astype('str')
+  try: 
+    ind = key.CIK[key.CIK == cik].index.tolist()[0]
+    ticker = key.Ticker[ind]
+  except IndexError: 
+    ticker = 'NaN'
+  return ticker
+
+def count_words(toks, dictionary):
+  cnts = [0]*len(dictionary)
+  for tok in toks:
+    if tok in dictionary: cnts[dictionary.tolist().index(tok)] += 1
+  return cnts
 
 if __name__ == "__main__":
-
-  # Parse command line arguments
-  #parser = argparse.ArgumentParser(description="Compute and plot trailing returns")
-  #parser.add_argument('--ticker', nargs='?', default='YHOO', help='Fund ticker symbol')
-  #parser.add_argument('--start_date', nargs='?', default='2013-04-25')
-  #parser.add_argument('--end_date', nargs='?', default='2017-01-10')
-  #args = parser.parse_args()
-
-  # Get data
-  #share = Share(args.ticker)
-  #data  = share.get_historical(args.start_date, args.end_date)
-  #data  = pd.DataFrame(data)
-  #data.Date  = pd.to_datetime(data.Date)
-  #data.set_index(data.Date, inplace=True)
-  #data.sort_index(inplace=True)
-  #data.Adj_Close = data.Adj_Close.astype(float)
-  #Close = data.T.values[0]
   
-  
-  # Read in a clean data 
+  # Scrape and clean 10-X data 
   data = pd.read_excel('data/LoughranMcDonald_10X_2014_test.xlsx', sheetname=0, skip_header=1)
   #data = pd.read_excel('data/LoughranMcDonald_10X_2014_test.xlsx', sheetname=0, skip_footer=910000)
-  print data.columns.values
-  print data.head(100)
-  names = data.FILE_NAME
+  dictionary = pd.read_excel('data/LoughranMcDonald_MasterDictionary_2014.xlsx', sheetname=0)
+  fin_neg = dictionary.Word[dictionary.Negative > 0].values
+  
+  #print data.columns.values
+
+  data = data.drop(['N_Positive', 'N_Uncertainty', 'N_Litigious', 'N_WeakModal', 'N_StrongModal', 'N_Constraining', 'N_Negation', 'GrossFileSize', 'NetFileSize', 'ASCIIEncodedChars', 'HTMLChars', 'XBRLChars', 'TableChars'], axis=1)
+  data['N_Words_Paper'] = data.N_Words
+  data['N_Unique_Words_Paper'] = data.N_Unique_Words
+  data['N_Negative_Paper'] = data.N_Negative
+  data = data.drop(['N_Negative'], axis=1)
+  
+
+  data.FILING_DATE  = data.FILING_DATE.astype('string')
+  for time in data.FILING_DATE:
+    t = time[0:4] + '-' + time[4:6] + '-' + time[6:8]
+    data.ix[data.FILING_DATE == time, 'FILING_DATE'] = t
+  data.FILING_DATE  = pd.to_datetime(data.FILING_DATE)
+  data['End_Date'] = data.FILING_DATE + timedelta(days=3)
+  #data.FILING_DATE  = data.FILING_DATE.astype('string')
+  #data.End_Date  = data.End_Date.astype('string')
+   
+  #print data.head(100)
+
   toks_total = []
   toks_unique = []
-  for name in names:
+  toks_freq = []
+  avg_freq = []
+  neg_counts = []
+  neg_total = []
+  for name in data.FILE_NAME:
+    fname = 'https://www.sec.gov/Archives/edgar/data/' + name.split('data_')[1].replace('_','/')
+    data.ix[data.FILE_NAME == name, 'FILE_NAME'] = fname 
+    try: 
+      if not os.path.exists(fname):
+        f = wget.download(fname, './data/10X')
+    except: continue
     
-    fname = wget.download('https://www.sec.gov/Archives/edgar/data/' + name.split('data_')[1].replace('_','/'), './data')
-    
-    os.rename(fname, fname + '.orig')
-    with open(fname + '.orig', 'rb') as fin, open(fname, 'wb') as fout:
+    # TO DO: compile regex before loop to speed up
+    os.rename(f, f + '.orig')
+    with open(f + '.orig', 'rb') as fin, open(f, 'wb') as fout:
       text = fin.read()
       text = re.sub(r'<IMS-HEADER>.*?</IMS-HEADER>', '', text, flags=re.DOTALL)
       text = re.sub(r'<SEC-HEADER>.*?</SEC-HEADER>', '', text, flags=re.DOTALL)
@@ -58,35 +90,52 @@ if __name__ == "__main__":
       text = re.sub(r'<EXCEL>.*?</EXCEL>', '', text, flags=re.DOTALL)
       text = re.sub(r'<PDF>.*?</PDF>', '', text, flags=re.DOTALL)
       text = re.sub(r'<XBRL>.*?</XBRL>', '', text, flags=re.DOTALL)
+      text = re.sub(r'<.*?>', '', text, flags=re.DOTALL)
       fout.write(text)
+    os.remove(f + '.orig')
 
-    text = open(fname).read()
+    text = open(f).read()
     toks = np.array(nltk.word_tokenize(text))
     
     # Clean words that contain numbers or special characters
-    special_inds = [not bool(re.search('[\d\/\*\'\-,=;:@<>\.]', x)) for x in toks]  
+    special_inds = [not bool(re.search('[\d\/\*\'\-,=;:@<>\.\_]', x)) for x in toks]  
     toks = toks[np.array(special_inds)]
     
     # Clean single char words
     word_inds = [len(x)>1 for x in toks]
     toks = toks[np.array(word_inds)]
+   
+    # Alphabetize
+    #toks = np.concatenate((toks, ['ABANDON']))
+    toks = sorted(toks) 
+
+    toks_total.append(toks)
+    data.ix[data.FILE_NAME == fname, 'N_Words'] = len(toks) 
+    #print 'N_words:        ' + str(len(toks))
     
-    toks_total.append(sorted(toks))
-    print 'N_words:        ' + str(len(toks))
+    toks_dict = OrderedDict(sorted(Counter(toks).items()))
+    toks_freq.append(toks_dict.values())
+    avg_freq.append(np.nanmean(toks_dict.values()))
+    toks_unique.append(toks_dict.keys())
     
-    # add negation here
+    # add negation here for positive words
+    # ['no', 'not', 'none', 'neither', 'never', 'nobody'] occurs four or fewer words before
     
-    toks = list(set(toks))
-    toks_unique.append(sorted(toks))
-    print 'N_Unique_Words: ' + str(len(toks))
+    data.ix[data.FILE_NAME == fname, 'N_Unique_Words'] = len(toks_dict.keys()) 
+    #print 'N_Unique_Words: ' + str(len(toks_dict.keys()))
+
+    neg_in_dict = count_words(toks, fin_neg)
+    neg_counts.append(neg_in_dict)
+    neg_total.append(sum(neg_in_dict))
+    #neg_counts.append(count_words(toks_dict.keys(), fin_neg))
   
   data['Toks_Total'] = toks_total
+  data['Toks_Freq'] = toks_freq
+  data['Avg_Freq'] = avg_freq
   data['Toks_Unique'] = toks_unique
-
-  print data.Toks_Unique
-  #print data.columns.values
-   
-
+  data['Neg_Counts'] = neg_counts
+  data['Neg_Total'] = neg_total
+ 
   ''' 
   test = np.array(['a', 'ab', '3-x', '--', '/HOME', '1', '3.4', '-as', 'ad', 'b', 'a1'])
   print test
@@ -110,8 +159,71 @@ if __name__ == "__main__":
   #  except ValueError: continue
   #print test 
   '''
+  
+   
+  # Remove companies not in key
+  nan_ind = []
+  tickers = []
+  for ind, cik in enumerate(data.CIK): 
+    ticker = cik_to_ticker(str(cik))
+    if ticker == 'NaN': 
+      nan_ind.append(ind)
+      continue
+    else: tickers.append(ticker)
+  data = data.drop(data.index[nan_ind])
+  data['Ticker'] = tickers
+  data = data.reset_index(drop=True)
+ 
+  # Get historical returns from yahoo_finance API 
+  filing_return = []
+  market_return = []
+  for ind, ticker in enumerate(data.Ticker):
+    share = Share(ticker)
+    market = Share('^GSPC')
+    #market = Share('^CRSPTM1')
+    try: 
+      returns = share.get_historical(str(data.FILING_DATE[ind])[0:10], str(data.End_Date[ind])[0:10])
+      market = market.get_historical(str(data.FILING_DATE[ind])[0:10], str(data.End_Date[ind])[0:10])
+    except: 
+      filing_return.append(float('NaN'))
+      market_return.append(float('NaN'))
+      continue
+    returns  = pd.DataFrame(returns)
+    returns.Adj_Close = returns.Adj_Close.astype(float)
+    filing_return.append( ((returns.Adj_Close.tail(1).values - returns.Adj_Close.head(1).values) / returns.Adj_Close.head(1).values)[0] )
+    market = pd.DataFrame(market)
+    market.Adj_Close = market.Adj_Close.astype(float)
+    market_return.append( ((market.Adj_Close.tail(1).values - market.Adj_Close.head(1).values) / market.Adj_Close.head(1).values)[0])
+  data['Filing_Return'] = filing_return
+  data['Market_Return'] = market_return
+  data['Excess_Return'] = data.Filing_Return - data.Market_Return
 
-  #dictionary = pd.read_excel('data/LoughranMcDonald_MasterDictionary_2014.xlsx', sheetname=0)
-  #print dictionary.columns.values
-  #print dictionary.head
+  data = data.dropna()
+  data = data.reset_index(drop=True)
+  
+  # number of documents containing 1+ occurance of ith word
+  df = [0] * len(dictionary)
+  for cnts in data.Neg_Counts:
+    for i, cnt in enumerate(cnts):
+      if cnt > 0: df[i] += 1
+  
+  # Number of documents
+  N = len(data.CIK.values)
+  dict_len = len(fin_neg)
+  
+  # Calculate sum of weights, scaled counts
+  w = [0] * N
+  for j in range(0, N):
+    weights = [0] * dict_len
+    for i in range(0, dict_len):
+      tf = data.Neg_Counts.values[j][i]
+      if tf > 0:
+        weights[i] = (1 + np.log(tf)) * np.log(N / df[i]) / (1 + np.log(data.Avg_Freq[j]))
+    w[j] = sum(weights)
+  data['Neg_Yield'] = w  
+  
+  print '---'
+  print data.Neg_Yield.values
+  print len(data.Neg_Yield.values)
+  data.to_csv(path_or_buf='data/cleaned_10X.csv') 
   
