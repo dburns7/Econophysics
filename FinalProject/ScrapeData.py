@@ -20,6 +20,7 @@ import os
 from collections import Counter
 from datetime import timedelta
 from collections import OrderedDict
+import random
 
 def cik_to_ticker(cik):
   key = pd.read_csv('data/cik_ticker.csv', sep='|')  
@@ -34,17 +35,25 @@ def cik_to_ticker(cik):
 def count_words(toks, dictionary):
   cnts = [0]*len(dictionary)
   for tok in toks:
-    if tok in dictionary: cnts[dictionary.tolist().index(tok)] += 1
+    if tok.upper() in dictionary: cnts[dictionary.tolist().index(tok.upper())] += 1
   return cnts
 
 if __name__ == "__main__":
   
   # Scrape and clean 10-X data 
-  data = pd.read_excel('data/LoughranMcDonald_10X_2014_test.xlsx', sheetname=0, skip_header=1)
+  #data = pd.read_excel('data/LoughranMcDonald_10X_2014_test.xlsx', sheetname=0, skip_header=1)
+  #data = pd.read_excel('data/test.xlsx', sheetname=0, skip_header=1)
+  data = pd.read_excel('data/LoughranMcDonald_10X_2014.xlsx', sheetname=0, skip_header=1)
+  N = 500
+  data = data.loc[random.sample(list(data.index), N)]
+  #data.to_csv(path_or_buf='data/LoughranMcDonald_10X_2014_test_2.xlsx')
+  #data = data.head(2000)
   #data = pd.read_excel('data/LoughranMcDonald_10X_2014_test.xlsx', sheetname=0, skip_footer=910000)
   dictionary = pd.read_excel('data/LoughranMcDonald_MasterDictionary_2014.xlsx', sheetname=0)
   fin_neg = dictionary.Word[dictionary.Negative > 0].values
-  
+  print list(fin_neg)
+  print 'wrongly' in fin_neg
+
   #print data.columns.values
 
   data = data.drop(['N_Positive', 'N_Uncertainty', 'N_Litigious', 'N_WeakModal', 'N_StrongModal', 'N_Constraining', 'N_Negation', 'GrossFileSize', 'NetFileSize', 'ASCIIEncodedChars', 'HTMLChars', 'XBRLChars', 'TableChars'], axis=1)
@@ -59,12 +68,28 @@ if __name__ == "__main__":
     t = time[0:4] + '-' + time[4:6] + '-' + time[6:8]
     data.ix[data.FILING_DATE == time, 'FILING_DATE'] = t
   data.FILING_DATE  = pd.to_datetime(data.FILING_DATE)
+  
+  #data['End_Date'] = data.FILING_DATE
   data['End_Date'] = data.FILING_DATE + timedelta(days=3)
+  #print data
+  '''
+  delta = timedelta(days=1)
+  for ind, date in enumerate(data.End_Date):
+    i=0
+    while i < 4:
+      if date.weekday() not in [5, 6]:
+        print data.End_Date[ind].weekday()
+        data.End_Date[ind] = data.End_Date[ind] + delta
+        i += 1
+ 
   #data.FILING_DATE  = data.FILING_DATE.astype('string')
   #data.End_Date  = data.End_Date.astype('string')
-   
+  print data
+  ''' 
   #print data.head(100)
-
+   
+  toks_dirty_all = []
+  toks_raw = []
   toks_total = []
   toks_unique = []
   toks_freq = []
@@ -73,13 +98,23 @@ if __name__ == "__main__":
   neg_total = []
   for name in data.FILE_NAME:
     fname = 'https://www.sec.gov/Archives/edgar/data/' + name.split('data_')[1].replace('_','/')
+    
     data.ix[data.FILE_NAME == name, 'FILE_NAME'] = fname 
     try: 
-      if not os.path.exists(fname):
-        f = wget.download(fname, './data/10X')
-    except: continue
-    
+      f = 'data/10X/' + fname.split('/')[-1]
+      #if not os.path.exists(f):
+      f = wget.download(fname, './data/10X')
+    except:
+      #data = data.drop(data.index[data.FILE_NAME == name])
+      continue
+
+    # uncleaned column
+    text1 = open(f).read()
+    toks_dirty = sorted(np.array(nltk.word_tokenize(text1)))
+    toks_dirty_all.append(toks_dirty)
+
     # TO DO: compile regex before loop to speed up
+
     os.rename(f, f + '.orig')
     with open(f + '.orig', 'rb') as fin, open(f, 'wb') as fout:
       text = fin.read()
@@ -95,11 +130,15 @@ if __name__ == "__main__":
     os.remove(f + '.orig')
 
     text = open(f).read()
-    toks = np.array(nltk.word_tokenize(text))
+    try: toks = np.array(nltk.word_tokenize(text))
+    except: 
+      #data = data.drop(data.index[data.FILE_NAME == name])
+      continue
     
     # Clean words that contain numbers or special characters
     special_inds = [not bool(re.search('[\d\/\*\'\-,=;:@<>\.\_]', x)) for x in toks]  
-    toks = toks[np.array(special_inds)]
+    try: toks = toks[np.array(special_inds)]
+    except: pass
     
     # Clean single char words
     word_inds = [len(x)>1 for x in toks]
@@ -109,7 +148,8 @@ if __name__ == "__main__":
     #toks = np.concatenate((toks, ['ABANDON']))
     toks = sorted(toks) 
 
-    toks_total.append(toks)
+    toks_raw.append(toks)
+    toks_total.append(len(toks))
     data.ix[data.FILE_NAME == fname, 'N_Words'] = len(toks) 
     #print 'N_words:        ' + str(len(toks))
     
@@ -123,18 +163,20 @@ if __name__ == "__main__":
     
     data.ix[data.FILE_NAME == fname, 'N_Unique_Words'] = len(toks_dict.keys()) 
     #print 'N_Unique_Words: ' + str(len(toks_dict.keys()))
-
     neg_in_dict = count_words(toks, fin_neg)
     neg_counts.append(neg_in_dict)
     neg_total.append(sum(neg_in_dict))
     #neg_counts.append(count_words(toks_dict.keys(), fin_neg))
-  
+ 
+  data['Toks_Dirty'] = toks_dirty_all
+  data['Toks_Raw'] = toks_raw
   data['Toks_Total'] = toks_total
   data['Toks_Freq'] = toks_freq
   data['Avg_Freq'] = avg_freq
   data['Toks_Unique'] = toks_unique
   data['Neg_Counts'] = neg_counts
   data['Neg_Total'] = neg_total
+  data['Prop_Yield'] = data.Neg_Total / data.Toks_Total
  
   ''' 
   test = np.array(['a', 'ab', '3-x', '--', '/HOME', '1', '3.4', '-as', 'ad', 'b', 'a1'])
@@ -223,7 +265,7 @@ if __name__ == "__main__":
   data['Neg_Yield'] = w  
   
   print '---'
-  print data.Neg_Yield.values
-  print len(data.Neg_Yield.values)
-  data.to_csv(path_or_buf='data/cleaned_10X.csv') 
-  
+  print data.N_Negative_Paper
+  print data.Neg_Total
+  data.to_csv(path_or_buf='data/cleaned_10X_100.csv') 
+   
